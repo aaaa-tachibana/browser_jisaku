@@ -72,12 +72,63 @@ class URL:
         return content
 
 class Text:
-    def __init__(self, text):
+    def __init__(self, text, parent):
         self.text = text
+        self.children = []
+        self.parent = parent
 
-class Tag:
-    def __init__(self, tag):
+class Element:
+    def __init__(self, tag, parent):
         self.tag = tag
+        self.children = []
+        self.parent = parent
+
+class HTMLParser:
+    def __init__(self, body):
+        self.body = body
+        self.unfinished = []
+    
+    def parse(self):
+        text = ""
+        in_tag = False
+        for c in self.body:
+            if c == "<":
+                in_tag = True
+                if text: self.add_text(text)
+                text = ""
+            elif c == ">":
+                in_tag = False
+                self.add_tag(text)
+                text = ""
+            else:
+                text += c
+        if not in_tag and text:
+            self.add_text(text)
+        return self.finish()
+    
+    def add_text(self, text):
+        parent = self.unfinished[-1]
+        node = Text(text, parent)
+        parent.children.append(node)
+    
+    def add_tag(self, tag):
+        if tag.startswith("/"):
+            if len(self.unfinished) == 1:
+                return
+            node = self.unfinished.pop()
+            parent = self.unfinished[-1]
+            parent.children.append(node)
+        else:
+            parent = self.unfinished[-1] if self.unfinished else None
+            node = Element(tag, parent)
+            self.unfinished.append(node)
+    
+    def finish(self):
+        while len(self.unfinished) > 1:
+            node = self.unfinished.pop()
+            parent = self.unfinished[-1]
+            parent.children.append(node)
+        return self.unfinished.pop()
 
 # 字句解析器
 def lex(body):
@@ -99,41 +150,93 @@ def lex(body):
         out.append(Text(buffer))
     return out
 
+FONTS = {}
+# フォントをキャッシング
+def get_font(size, weight, style):
+    key = (size, weight, style)
+    if key not in FONTS:
+        font = tkfont.Font(size=size, weight=weight, slant=style)
+        label = tkinter.Label(font=font)
+        FONTS[key] = (font, label)
+    return FONTS[key][0]
+
 # windowのサイズ
 WIDTH, HEIGHT = 800, 600
 # 文字を表示する時の水平方向、垂直方向のステップ
 HSTEP, VSTEP = 13,18
-# スクロールする時のステップ
-SCROLL_STEP = 100s
 
-def layout(tokens):
-    display_list = []
-    font = tkfont.Font()
-    cursor_x, cursor_y = HSTEP, VSTEP
-    for tok in tokens:
+class Layout:
+    def __init__(self, tokens):
+        self.display_list = []
+        self.line = []
+        self.cursor_x = HSTEP
+        self.cursor_y = VSTEP
+        self.weight = "normal"
+        self.style = "roman"
+        self.size = 12
+
+        for tok in tokens:
+            self.token(tok)
+
+        self.flush()
+    
+    def token(self, tok):
         if isinstance(tok, Text):
             for word in tok.text.split():
-                font = tkfont.Font(size=16, weight=weight, slant=style)
-                w = font.measure(word)
-                if cursor_x + w > WIDTH - HSTEP:
-                    cursor_x = HSTEP
-                    cursor_y += font.metrics("linespace") * 1.25
-                
-                display_list.append(
-                    (cursor_x, cursor_y, word, font)
-                )
-                cursor_x += w + font.measure(" ")
-
+                self.word(word)
         elif tok.tag == "i":
-            style = "italic"
+            self.style = "italic"
         elif tok.tag == "/i": # タグ終了時
-            style = "roman"
+            self.style = "roman"
         elif tok.tag == "b":
-            weight = "bold"
+            self.weight = "bold"
         elif tok.tag == "/b": # タグ終了時
-            weight = "normal"
+            self.weight = "normal"
+        elif tok.tag == "small":
+            self.size -= 2
+        elif tok.tag == "/small":
+            self.size += 2
+        elif tok.tag == "big":
+            self.size += 4
+        elif tok.tag == "/big":
+            self.size -= 4
+        elif tok.tag == "br":
+            self.flush()
+        elif tok.tag == "/p":
+            self.flush()
+            self.cursor_y += VSTEP
+    
+    # 単語を行に追加
+    def word(self, word):
+        font = get_font(self.size, self.weight, self.style)
+        w = font.measure(word)
+        # 行の幅が画面の幅を超えた場合はフラッシュ
+        if self.cursor_x + w > WIDTH - HSTEP:
+            self.flush()
+        self.line.append((self.cursor_x, word, font))
+        self.cursor_x += w + font.measure(" ")
+    
+    # 文字のレンダリング位置をフォントサイズに合わせて調整し、行を確定してレンダリングリストに追加
+    def flush(self):
+        if not self.line: return
 
-    return display_list
+        # 行内で最も高い ascent に合わせてベースラインを決める
+        max_ascent = max(font.metrics("ascent") for x, word, font in self.line)
+        baseline = self.cursor_y + 1.25 * max_ascent
+
+        # 各単語をベースラインにあわせて配置
+        for x, word, font in self.line:
+            y = baseline - font.metrics("ascent")
+            self.display_list.append((x, y, word, font))
+
+        # 次の行の開始位置へ進める
+        max_descent = max(font.metrics("descent") for x, word, font in self.line)
+        self.cursor_y = baseline + 1.25 * max_descent
+        self.cursor_x = HSTEP
+        self.line = []
+
+# スクロールする時のステップ
+SCROLL_STEP = 100
 
 class Browser:
     def __init__(self):
@@ -158,17 +261,11 @@ class Browser:
             if y + VSTEP < self.scroll: continue
             self.canvas.create_text(x,y - self.scroll,text=word, font=font, anchor="nw")
 
-    def calculate_max_scroll(self):
-        if not self.display_list:
-            return 0
-        max_y = self.display_list[-1][1]
-        return max(0, max_y + VSTEP - HEIGHT)
-
     def load(self, url):
         body = url.request()
-        text = lex(body)
+        tokens = lex(body)
 
-        self.display_list = layout(text)
+        self.display_list = Layout(tokens).display_list
         self.max_scroll = self.calculate_max_scroll()
         self.draw()
 
@@ -179,6 +276,12 @@ class Browser:
     def scroll_up(self, e):
         self.scroll = max(0, self.scroll - SCROLL_STEP)
         self.draw()
+    
+    def calculate_max_scroll(self):
+        if not self.display_list:
+            return 0
+        max_y = self.display_list[-1][1]
+        return max(0, max_y + VSTEP - HEIGHT)
 
 if __name__ == "__main__":
     import sys
