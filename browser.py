@@ -76,12 +76,23 @@ class Text:
         self.text = text
         self.children = []
         self.parent = parent
+    
+    def __repr__(self):
+        return repr(self.text)
 
 class Element:
-    def __init__(self, tag, parent):
+    def __init__(self, tag, parent, attributes):
         self.tag = tag
+        self.attributes = attributes
         self.children = []
         self.parent = parent
+    
+    def __repr__(self):
+        return "<{}>".format(self.tag)
+
+SELF_CLOSING_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"
+}
 
 class HTMLParser:
     def __init__(self, body):
@@ -107,20 +118,30 @@ class HTMLParser:
         return self.finish()
     
     def add_text(self, text):
+        if text.isspace():
+            return
         parent = self.unfinished[-1]
         node = Text(text, parent)
         parent.children.append(node)
     
     def add_tag(self, tag):
+        tag, attributes = self.get_attributes(tag)
+        if tag.startswith("!"):
+            return
+
         if tag.startswith("/"):
             if len(self.unfinished) == 1:
                 return
             node = self.unfinished.pop()
             parent = self.unfinished[-1]
             parent.children.append(node)
+        elif tag in SELF_CLOSING_TAGS:
+            parent = self.unfinished[-1]
+            node = Element(tag, parent, attributes)
+            parent.children.append(node)
         else:
             parent = self.unfinished[-1] if self.unfinished else None
-            node = Element(tag, parent)
+            node = Element(tag, parent, attributes)
             self.unfinished.append(node)
     
     def finish(self):
@@ -129,26 +150,27 @@ class HTMLParser:
             parent = self.unfinished[-1]
             parent.children.append(node)
         return self.unfinished.pop()
+    
+    def get_attributes(self, text):
+        parts = text.split()
+        tag = parts[0].casefold()
+        attributes = {}
+        for attrpair in parts[1:]:
+            if "=" in attrpair:
+                key, value = attrpair.split("=", 1)
+                if len(value) > 2 and value[0] in ["'", "\""]:
+                    value = value[1:-1]
+                attributes[key.casefold()] = value
+            else:
+                attributes[attrpair.casefold()] = ""
+            
+        return tag, attributes
 
-# 字句解析器
-def lex(body):
-    out = []
-    buffer = "" # テキストやタグを一時的に保持
-    in_tag = False
-    for c in body:
-        if c == "<":
-            in_tag = True
-            if buffer: out.append(Text(buffer))
-            buffer = ""
-        elif c == ">":
-            in_tag = False
-            out.append(Tag(buffer))
-            buffer = ""
-        else:
-            buffer += c
-    if not in_tag and buffer:
-        out.append(Text(buffer))
-    return out
+# HTMLパーサーデバッグ用
+def print_tree(node, indent=0):
+    print(" " * indent, node)
+    for child in node.children:
+        print_tree(child, indent + 2)
 
 FONTS = {}
 # フォントをキャッシング
@@ -166,7 +188,7 @@ WIDTH, HEIGHT = 800, 600
 HSTEP, VSTEP = 13,18
 
 class Layout:
-    def __init__(self, tokens):
+    def __init__(self, tree):
         self.display_list = []
         self.line = []
         self.cursor_x = HSTEP
@@ -175,36 +197,43 @@ class Layout:
         self.style = "roman"
         self.size = 12
 
-        for tok in tokens:
-            self.token(tok)
-
+        self.recurse(tree)
         self.flush()
     
-    def token(self, tok):
-        if isinstance(tok, Text):
-            for word in tok.text.split():
-                self.word(word)
-        elif tok.tag == "i":
+    def open_tag(self, tag):
+        if tag == "i":
             self.style = "italic"
-        elif tok.tag == "/i": # タグ終了時
-            self.style = "roman"
-        elif tok.tag == "b":
+        elif tag == "b":
             self.weight = "bold"
-        elif tok.tag == "/b": # タグ終了時
-            self.weight = "normal"
-        elif tok.tag == "small":
+        elif tag == "small":
             self.size -= 2
-        elif tok.tag == "/small":
-            self.size += 2
-        elif tok.tag == "big":
+        elif tag == "big":
             self.size += 4
-        elif tok.tag == "/big":
-            self.size -= 4
-        elif tok.tag == "br":
+        elif tag == "br":
             self.flush()
-        elif tok.tag == "/p":
+    
+    def close_tag(self, tag):
+        if tag == "i":
+            self.style = "roman"
+        elif tag == "b":
+            self.weight = "normal"
+        elif tag == "small":
+            self.size += 2
+        elif tag == "big":
+            self.size -= 4
+        elif tag == "p":
             self.flush()
             self.cursor_y += VSTEP
+    
+    def recurse(self, tree):
+        if isinstance(tree, Text):
+            for word in tree.text.split():
+                self.word(word)
+        else:
+            self.open_tag(tree.tag)
+            for child in tree.children:
+                self.recurse(child)
+            self.close_tag(tree.tag)
     
     # 単語を行に追加
     def word(self, word):
@@ -263,9 +292,8 @@ class Browser:
 
     def load(self, url):
         body = url.request()
-        tokens = lex(body)
-
-        self.display_list = Layout(tokens).display_list
+        self.nodes = HTMLParser(body).parse()
+        self.display_list = Layout(self.nodes).display_list
         self.max_scroll = self.calculate_max_scroll()
         self.draw()
 
@@ -282,8 +310,13 @@ class Browser:
             return 0
         max_y = self.display_list[-1][1]
         return max(0, max_y + VSTEP - HEIGHT)
-
+    
 if __name__ == "__main__":
     import sys
-    Browser().load(URL(sys.argv[1]))
-    tkinter.mainloop()
+    if len(sys.argv) == 3 and sys.argv[1] == "--tree":
+        body = URL(sys.argv[2]).request()
+        nodes = HTMLParser(body).parse()
+        print_tree(nodes)
+    else:
+        Browser().load(URL(sys.argv[1]))
+        tkinter.mainloop()
