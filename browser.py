@@ -90,14 +90,22 @@ class Element:
     def __repr__(self):
         return "<{}>".format(self.tag)
 
-SELF_CLOSING_TAGS = {
-    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"
-}
+# HTMLパーサーデバッグ用
+def print_tree(node, indent=0):
+    print(" " * indent, node)
+    for child in node.children:
+        print_tree(child, indent + 2)
 
 class HTMLParser:
     def __init__(self, body):
         self.body = body
         self.unfinished = []
+        self.SELF_CLOSING_TAGS = [
+            "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"
+        ]
+        self.HEAD_TAGS = [
+            "title", "base", "link", "meta", "style", "script"
+        ]
     
     def parse(self):
         text = ""
@@ -117,40 +125,6 @@ class HTMLParser:
             self.add_text(text)
         return self.finish()
     
-    def add_text(self, text):
-        if text.isspace():
-            return
-        parent = self.unfinished[-1]
-        node = Text(text, parent)
-        parent.children.append(node)
-    
-    def add_tag(self, tag):
-        tag, attributes = self.get_attributes(tag)
-        if tag.startswith("!"):
-            return
-
-        if tag.startswith("/"):
-            if len(self.unfinished) == 1:
-                return
-            node = self.unfinished.pop()
-            parent = self.unfinished[-1]
-            parent.children.append(node)
-        elif tag in SELF_CLOSING_TAGS:
-            parent = self.unfinished[-1]
-            node = Element(tag, parent, attributes)
-            parent.children.append(node)
-        else:
-            parent = self.unfinished[-1] if self.unfinished else None
-            node = Element(tag, parent, attributes)
-            self.unfinished.append(node)
-    
-    def finish(self):
-        while len(self.unfinished) > 1:
-            node = self.unfinished.pop()
-            parent = self.unfinished[-1]
-            parent.children.append(node)
-        return self.unfinished.pop()
-    
     def get_attributes(self, text):
         parts = text.split()
         tag = parts[0].casefold()
@@ -165,12 +139,59 @@ class HTMLParser:
                 attributes[attrpair.casefold()] = ""
             
         return tag, attributes
+    
+    def add_text(self, text):
+        if text.isspace():
+            return
+        self.implicit_tags(None)
+        parent = self.unfinished[-1]
+        node = Text(text, parent)
+        parent.children.append(node)
+    
+    def add_tag(self, tag):
+        tag, attributes = self.get_attributes(tag)
+        if tag.startswith("!"):
+            return
+        self.implicit_tags(tag)
 
-# HTMLパーサーデバッグ用
-def print_tree(node, indent=0):
-    print(" " * indent, node)
-    for child in node.children:
-        print_tree(child, indent + 2)
+        if tag.startswith("/"):
+            if len(self.unfinished) == 1:
+                return
+            node = self.unfinished.pop()
+            parent = self.unfinished[-1]
+            parent.children.append(node)
+        elif tag in self.SELF_CLOSING_TAGS:
+            parent = self.unfinished[-1]
+            node = Element(tag, parent, attributes)
+            parent.children.append(node)
+        else:
+            parent = self.unfinished[-1] if self.unfinished else None
+            node = Element(tag, parent, attributes)
+            self.unfinished.append(node)
+    
+    def implicit_tags(self, tag):
+        while True:
+            open_tags = [node.tag for node in self.unfinished]
+            if open_tags == [] and tag != "html":
+                self.add_tag("html")
+            elif open_tags == ["html"] and tag not in ["head", "body", "/html"]:
+                if tag in self.HEAD_TAGS:
+                    self.add_tag("head")
+                else:
+                    self.add_tag("body")
+            elif open_tags == ["html", "head"] and tag not in ["/head"] + self.HEAD_TAGS:
+                self.add_tag("/head")
+            else:
+                break
+    
+    def finish(self):
+        if not self.unfinished:
+            self.implicit_tags(None)
+        while len(self.unfinished) > 1:
+            node = self.unfinished.pop()
+            parent = self.unfinished[-1]
+            parent.children.append(node)
+        return self.unfinished.pop()
 
 FONTS = {}
 # フォントをキャッシング
@@ -200,6 +221,16 @@ class Layout:
         self.recurse(tree)
         self.flush()
     
+    def recurse(self, tree):
+        if isinstance(tree, Text):
+            for word in tree.text.split():
+                self.word(word)
+        else:
+            self.open_tag(tree.tag)
+            for child in tree.children:
+                self.recurse(child)
+            self.close_tag(tree.tag)
+    
     def open_tag(self, tag):
         if tag == "i":
             self.style = "italic"
@@ -225,26 +256,6 @@ class Layout:
             self.flush()
             self.cursor_y += VSTEP
     
-    def recurse(self, tree):
-        if isinstance(tree, Text):
-            for word in tree.text.split():
-                self.word(word)
-        else:
-            self.open_tag(tree.tag)
-            for child in tree.children:
-                self.recurse(child)
-            self.close_tag(tree.tag)
-    
-    # 単語を行に追加
-    def word(self, word):
-        font = get_font(self.size, self.weight, self.style)
-        w = font.measure(word)
-        # 行の幅が画面の幅を超えた場合はフラッシュ
-        if self.cursor_x + w > WIDTH - HSTEP:
-            self.flush()
-        self.line.append((self.cursor_x, word, font))
-        self.cursor_x += w + font.measure(" ")
-    
     # 文字のレンダリング位置をフォントサイズに合わせて調整し、行を確定してレンダリングリストに追加
     def flush(self):
         if not self.line: return
@@ -263,6 +274,16 @@ class Layout:
         self.cursor_y = baseline + 1.25 * max_descent
         self.cursor_x = HSTEP
         self.line = []
+    
+    # 単語を行に追加
+    def word(self, word):
+        font = get_font(self.size, self.weight, self.style)
+        w = font.measure(word)
+        # 行の幅が画面の幅を超えた場合はフラッシュ
+        if self.cursor_x + w > WIDTH - HSTEP:
+            self.flush()
+        self.line.append((self.cursor_x, word, font))
+        self.cursor_x += w + font.measure(" ")
 
 # スクロールする時のステップ
 SCROLL_STEP = 100
