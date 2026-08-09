@@ -63,7 +63,6 @@ class BlockLayout:
         self.y = None
         self.width = None
         self.height = None
-        self.display_list = []
 
     def layout_mode(self):
         if isinstance(self.node, Text):
@@ -91,19 +90,13 @@ class BlockLayout:
                 self.children.append(next)
                 previous = next
         else:  # inlineモード
-            self.cursor_x = 0
-            self.cursor_y = 0
-            self.line = []
+            line = self.new_line()
             self.recurse(self.node)
-            self.flush()
 
         for child in self.children:
             child.layout()
 
-        if mode == "block":
-            self.height = sum([child.height for child in self.children])
-        else:
-            self.height = self.cursor_y
+        self.height = sum([child.height for child in self.children])
 
     def recurse(self, node):
         if isinstance(node, Text):
@@ -111,32 +104,11 @@ class BlockLayout:
                 self.word(node, word)
         else:
             if node.tag == "br":
-                self.flush()
+                self.new_line()
             for child in node.children:
                 self.recurse(child)
 
-    # 文字のレンダリング位置をフォントサイズに合わせて調整し、行を確定してレンダリングリストに追加
-    def flush(self):
-        if not self.line:
-            return
-
-        # 行内で最も高い ascent に合わせてベースラインを決める
-        max_ascent = max(font.metrics("ascent") for x, word, font, color in self.line)
-        baseline = self.cursor_y + 1.25 * max_ascent
-
-        # 各単語をベースラインにあわせて配置
-        for rel_x, word, font, color in self.line:
-            x = self.x + rel_x
-            y = self.y + baseline - font.metrics("ascent")
-            self.display_list.append((x, y, word, font, color))
-
-        # 次の行の開始位置へ進める
-        max_descent = max(font.metrics("descent") for x, word, font, color in self.line)
-        self.cursor_y = baseline + 1.25 * max_descent
-        self.cursor_x = 0
-        self.line = []
-
-    # 単語を行に追加（計算済みスタイルからフォントと色を取る）
+    # 単語を行に追加（計算済みスタイルからフォントを取る）
     def word(self, node, word):
         weight = node.style["font-weight"]
         style = node.style["font-style"]
@@ -145,12 +117,21 @@ class BlockLayout:
         size = int(float(node.style["font-size"][:-2]) * 0.75)
         font = get_font(size, weight, style)
 
-        color = node.style["color"]
         w = font.measure(word)
         if self.cursor_x + w > self.width:
-            self.flush()
-        self.line.append((self.cursor_x, word, font, color))
+            self.new_line()
+
+        line = self.children[-1]
+        previous_word = line.children[-1] if line.children else None
+        text = TextLayout(node, word, line, previous_word)
+        line.children.append(text)
         self.cursor_x += w + font.measure(" ")
+    
+    def new_line(self):
+        self.cursor_x = 0
+        last_line = self.children[-1] if self.children else None
+        new_line = LineLayout(self.node, self, last_line)
+        self.children.append(new_line)
 
     def paint(self):
         cmds = []
@@ -162,11 +143,64 @@ class BlockLayout:
         if bgcolor != "transparent":
             x2, y2 = self.x + self.width, self.y + self.height
             cmds.append(DrawRect(self.x, self.y, x2, y2, bgcolor))
-
-        if self.layout_mode() == "inline":
-            for x, y, word, font, color in self.display_list:
-                cmds.append(DrawText(x, y, word, font, color))
         return cmds
+
+class LineLayout:
+    def __init__(self, node, parent, previous):
+        self.node = node
+        self.parent = parent
+        self.previous = previous
+        self.children = []
+    
+    def layout(self):
+        self.width = self.parent.width
+        self.x = self.parent.x
+        if self.previous:
+            self.y = self.previous.y + self.previous.height
+        else:
+            self.y = self.parent.y
+        
+        for word in self.children:
+            word.layout()
+    
+        max_ascent = max(child.font.metrics("ascent") for child in self.children)
+        baseline = self.y + 1.25 * max_ascent
+        for word in self.children:
+            word.y = baseline - word.font.metrics("ascent")
+        max_descent = max(child.font.metrics("descent") for child in self.children)
+        self.height = 1.25 * (max_ascent + max_descent)
+    
+    def paint(self):
+        return []
+
+class TextLayout:
+    def __init__(self, node, word, parent, previous):
+        self.node = node
+        self.word = word
+        self.children = []
+        self.parent = parent
+        self.previous = previous
+    
+    def layout(self):
+        weight = self.node.style["font-weight"]
+        style = self.node.style["font-style"]
+        if style == "normal":
+            style = "roman"
+        size = int(float(self.node.style["font-size"][:-2]) * 0.75)
+        self.font = get_font(size, weight, style)
+
+        self.width = self.font.measure(self.word)
+        if self.previous:
+            space = self.previous.font.measure(" ")
+            self.x = self.previous.x + self.previous.width + space
+        else:
+            self.x = self.parent.x
+        
+        self.height = self.font.metrics("linespace")
+    
+    def paint(self):
+        color = self.node.style["color"]
+        return [DrawText(self.x, self.y, self.word, self.font, color)]
 
 
 class DrawText:
