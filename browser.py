@@ -1,7 +1,7 @@
 import tkinter
 
 from css_parser import CSSParser, cascade_priority, style
-from html_parser import Element, HTMLParser, print_tree
+from html_parser import Element, HTMLParser, Text, print_tree
 from layout import (
     DocumentLayout,
     HEIGHT,
@@ -33,6 +33,10 @@ class Browser:
         self.window.bind("<Down>", self.scroll_down)
         self.window.bind("<Up>", self.scroll_up)
 
+        # クリック関連
+        self.window.bind("<Button-1>", self.click)
+        self.url = None
+
     def draw(self):
         self.canvas.delete("all")
         for cmd in self.display_list:
@@ -43,6 +47,8 @@ class Browser:
             cmd.execute(self.scroll, self.canvas)
 
     def load(self, url):
+        self.url = url
+        self.scroll = 0
         body = url.request()
         self.nodes = HTMLParser(body).parse()
         rules = DEFAULT_STYLE_SHEET.copy()
@@ -79,6 +85,28 @@ class Browser:
 
     def calculate_max_scroll(self):
         return max(0, self.document.height + 2 * VSTEP - HEIGHT)
+    
+    def click(self, e):
+        x, y = e.x, e.y
+        y += self.scroll
+        objs = [
+            obj for obj in tree_to_list(self.document, [])
+            if obj.x <= x < obj.x + obj.width
+            and obj.y <= y < obj.y + obj.height
+        ]
+        if not objs:
+            return
+        # クリックされたオブジェクト
+        elt = objs[-1].node
+        while elt:
+            if isinstance(elt, Text):
+                pass
+            elif elt.tag == "a" and "href" in elt.attributes:
+                # リンクをクリックした
+                url = self.url.resolve(elt.attributes["href"])
+                return self.load(url)
+            elt = elt.parent
+
 
 def tree_to_list(tree, list):
     list.append(tree)
