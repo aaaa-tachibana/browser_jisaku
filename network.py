@@ -4,7 +4,9 @@ import ssl
 
 class URL:
     def __init__(self, url):
+        url = url.strip()
         self.scheme, url = url.split("://", 1)
+        self.scheme = self.scheme.strip().casefold()
         assert self.scheme in ["http", "https"]
 
         if self.scheme == "http":
@@ -21,7 +23,7 @@ class URL:
         if ":" in self.host:
             self.host, self.port = self.host.split(":", 1)
             self.port = int(self.port)
-    
+
     def __str__(self):
         port_part = ":" + str(self.port)
         if self.scheme == "https" and self.port == 443:

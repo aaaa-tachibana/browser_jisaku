@@ -41,6 +41,7 @@ class Browser:
         self.window.bind("<Button-1>", self.handle_click)
         self.window.bind("<Key>", self.handle_key)
         self.window.bind("<Return>", self.handle_enter)
+        self.window.bind("<BackSpace>", self.handle_backspace)
 
     def handle_down(self, e):
         self.active_tab.scroll_down()
@@ -59,6 +60,8 @@ class Browser:
         self.draw()
     
     def handle_key(self, e):
+        if e.keysym in ("Return", "BackSpace"):
+            return
         if len(e.char) == 0:
             return
         # 英数字+記号だけを受け付ける
@@ -69,6 +72,10 @@ class Browser:
     
     def handle_enter(self, e):
         self.chrome.enter()
+        self.draw()
+
+    def handle_backspace(self, e):
+        self.chrome.backspace()
         self.draw()
 
     def new_tab(self, url):
@@ -312,9 +319,13 @@ class Chrome:
         if self.focus == "address bar":
             self.address_text += char
 
+    def backspace(self):
+        if self.focus == "address bar" and self.address_text:
+            self.address_text = self.address_text[:-1]
+
     def enter(self):
         if self.focus == "address bar":
-            self.browser.active_tab.load(URL(self.address_text))
+            self.browser.active_tab.load(URL(self.address_text.strip()))
             self.focus = None
 
 if __name__ == "__main__":
