@@ -5,6 +5,19 @@ from html_parser import Element, Text
 
 FONTS = {}
 
+# windowのサイズ
+WIDTH, HEIGHT = 800, 600
+# 文字を表示する時の水平方向、垂直方向のステップ
+HSTEP, VSTEP = 13, 18
+
+BLOCK_ELEMENTS = [
+    "html", "body", "article", "section", "nav", "aside",
+    "h1", "h2", "h3", "h4", "h5", "h6", "header", "footer",
+    "hgroup", "address", "p", "hr", "pre", "blockquote",
+    "ol", "ul", "li", "dl", "dt", "dd", "figure", "figcaption",
+    "main", "div", "table", "form", "fieldset", "legend", "details", "summary",
+]
+
 
 # フォントをキャッシング
 def get_font(size, weight, style):
@@ -16,10 +29,96 @@ def get_font(size, weight, style):
     return FONTS[key][0]
 
 
-# windowのサイズ
-WIDTH, HEIGHT = 800, 600
-# 文字を表示する時の水平方向、垂直方向のステップ
-HSTEP, VSTEP = 13, 18
+def get_font_from_style(node):
+    weight = node.style["font-weight"]
+    style = node.style["font-style"]
+    if style == "normal":
+        style = "roman"
+    size = int(float(node.style["font-size"][:-2]) * 0.75)
+    return get_font(size, weight, style)
+
+
+def tree_to_list(tree, list):
+    list.append(tree)
+    for child in tree.children:
+        tree_to_list(child, list)
+    return list
+
+
+class Rect:
+    def __init__(self, left, top, right, bottom):
+        self.left = left
+        self.top = top
+        self.right = right
+        self.bottom = bottom
+
+    def contains_point(self, x, y):
+        return self.left <= x < self.right and self.top <= y < self.bottom
+
+
+class DrawText:
+    def __init__(self, x1, y1, text, font, color):
+        self.rect = Rect(
+            x1, y1,
+            x1 + font.measure(text),
+            y1 + font.metrics("linespace"),
+        )
+        self.text = text
+        self.font = font
+        self.color = color
+
+    def execute(self, scroll, canvas):
+        canvas.create_text(
+            self.rect.left, self.rect.top - scroll,
+            text=self.text,
+            font=self.font,
+            anchor="nw",
+            fill=self.color,
+        )
+
+
+class DrawRect:
+    def __init__(self, rect, color):
+        self.rect = rect
+        self.color = color
+
+    def execute(self, scroll, canvas):
+        canvas.create_rectangle(
+            self.rect.left, self.rect.top - scroll,
+            self.rect.right, self.rect.bottom - scroll,
+            width=0,
+            fill=self.color,
+        )
+
+
+class DrawLine:
+    def __init__(self, x1, y1, x2, y2, color, thickness):
+        self.rect = Rect(x1, y1, x2, y2)
+        self.color = color
+        self.thickness = thickness
+
+    def execute(self, scroll, canvas):
+        canvas.create_line(
+            self.rect.left, self.rect.top - scroll,
+            self.rect.right, self.rect.bottom - scroll,
+            width=self.thickness,
+            fill=self.color,
+        )
+
+
+class DrawOutline:
+    def __init__(self, rect, color, thickness):
+        self.rect = rect
+        self.color = color
+        self.thickness = thickness
+
+    def execute(self, scroll, canvas):
+        canvas.create_rectangle(
+            self.rect.left, self.rect.top - scroll,
+            self.rect.right, self.rect.bottom - scroll,
+            width=self.thickness,
+            outline=self.color,
+        )
 
 
 class DocumentLayout:
@@ -52,13 +151,6 @@ class BlockLayout:
         self.parent = parent
         self.previous = previous
         self.children = []
-        self.BLOCK_ELEMENTS = [
-            "html", "body", "article", "section", "nav", "aside",
-            "h1", "h2", "h3", "h4", "h5", "h6", "header", "footer",
-            "hgroup", "address", "p", "hr", "pre", "blockquote",
-            "ol", "ul", "li", "dl", "dt", "dd", "figure", "figcaption",
-            "main", "div", "table", "form", "fieldset", "legend", "details", "summary"
-        ]
         self.x = None
         self.y = None
         self.width = None
@@ -67,7 +159,10 @@ class BlockLayout:
     def layout_mode(self):
         if isinstance(self.node, Text):
             return "inline"
-        elif any([isinstance(child, Element) and child.tag in self.BLOCK_ELEMENTS for child in self.node.children]):
+        elif any(
+            isinstance(child, Element) and child.tag in BLOCK_ELEMENTS
+            for child in self.node.children
+        ):
             return "block"
         elif self.node.children:
             return "inline"
@@ -90,7 +185,7 @@ class BlockLayout:
                 self.children.append(next)
                 previous = next
         else:  # inlineモード
-            line = self.new_line()
+            self.new_line()
             self.recurse(self.node)
 
         for child in self.children:
@@ -108,15 +203,8 @@ class BlockLayout:
             for child in node.children:
                 self.recurse(child)
 
-    # 単語を行に追加（計算済みスタイルからフォントを取る）
     def word(self, node, word):
-        weight = node.style["font-weight"]
-        style = node.style["font-style"]
-        if style == "normal":
-            style = "roman"
-        size = int(float(node.style["font-size"][:-2]) * 0.75)
-        font = get_font(size, weight, style)
-
+        font = get_font_from_style(node)
         w = font.measure(word)
         if self.cursor_x + w > self.width:
             self.new_line()
@@ -126,24 +214,26 @@ class BlockLayout:
         text = TextLayout(node, word, line, previous_word)
         line.children.append(text)
         self.cursor_x += w + font.measure(" ")
-    
+
     def new_line(self):
         self.cursor_x = 0
         last_line = self.children[-1] if self.children else None
         new_line = LineLayout(self.node, self, last_line)
         self.children.append(new_line)
 
+    def self_rect(self):
+        return Rect(self.x, self.y, self.x + self.width, self.y + self.height)
+
     def paint(self):
         cmds = []
-
         # 背景は文字より先に描く（後から描いたものが上に来る）
         bgcolor = "transparent"
         if not isinstance(self.node, Text):
             bgcolor = self.node.style.get("background-color", "transparent")
         if bgcolor != "transparent":
-            x2, y2 = self.x + self.width, self.y + self.height
-            cmds.append(DrawRect(self.x, self.y, x2, y2, bgcolor))
+            cmds.append(DrawRect(self.self_rect(), bgcolor))
         return cmds
+
 
 class LineLayout:
     def __init__(self, node, parent, previous):
@@ -181,6 +271,7 @@ class LineLayout:
     def paint(self):
         return []
 
+
 class TextLayout:
     def __init__(self, node, word, parent, previous):
         self.node = node
@@ -195,61 +286,18 @@ class TextLayout:
         self.font = None
 
     def layout(self):
-        weight = self.node.style["font-weight"]
-        style = self.node.style["font-style"]
-        if style == "normal":
-            style = "roman"
-        size = int(float(self.node.style["font-size"][:-2]) * 0.75)
-        self.font = get_font(size, weight, style)
-
+        self.font = get_font_from_style(self.node)
         self.width = self.font.measure(self.word)
         if self.previous:
             space = self.previous.font.measure(" ")
             self.x = self.previous.x + self.previous.width + space
         else:
             self.x = self.parent.x
-
         self.height = self.font.metrics("linespace")
 
     def paint(self):
         color = self.node.style["color"]
         return [DrawText(self.x, self.y, self.word, self.font, color)]
-
-
-class DrawText:
-    def __init__(self, x1, y1, text, font, color):
-        self.top = y1
-        self.left = x1
-        self.text = text
-        self.font = font
-        self.color = color
-        self.bottom = y1 + font.metrics("linespace")
-
-    def execute(self, scroll, canvas):
-        canvas.create_text(
-            self.left, self.top - scroll,
-            text=self.text,
-            font=self.font,
-            anchor="nw",
-            fill=self.color
-        )
-
-
-class DrawRect:
-    def __init__(self, x1, y1, x2, y2, color):
-        self.top = y1
-        self.left = x1
-        self.bottom = y2
-        self.right = x2
-        self.color = color
-
-    def execute(self, scroll, canvas):
-        canvas.create_rectangle(
-            self.left, self.top - scroll,
-            self.right, self.bottom - scroll,
-            width=0,
-            fill=self.color
-        )
 
 
 def paint_tree(layout_object, display_list):

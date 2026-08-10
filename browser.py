@@ -4,10 +4,17 @@ from css_parser import CSSParser, cascade_priority, style
 from html_parser import Element, HTMLParser, Text, print_tree
 from layout import (
     DocumentLayout,
+    DrawLine,
+    DrawOutline,
+    DrawRect,
+    DrawText,
     HEIGHT,
+    Rect,
     VSTEP,
     WIDTH,
+    get_font,
     paint_tree,
+    tree_to_list,
 )
 from network import URL
 
@@ -23,28 +30,60 @@ class Browser:
         self.canvas = tkinter.Canvas(
             self.window,
             width=WIDTH,
-            height=HEIGHT
+            height=HEIGHT,
         )
         self.canvas.pack()
+        self.tabs = []
+        self.active_tab = None
+        self.chrome = Chrome(self)
+        self.window.bind("<Down>", self.handle_down)
+        self.window.bind("<Up>", self.handle_up)
+        self.window.bind("<Button-1>", self.handle_click)
 
-        # スクロール関連
-        self.scroll = 0
-        self.max_scroll = 0
-        self.window.bind("<Down>", self.scroll_down)
-        self.window.bind("<Up>", self.scroll_up)
+    def handle_down(self, e):
+        self.active_tab.scroll_down()
+        self.draw()
 
-        # クリック関連
-        self.window.bind("<Button-1>", self.click)
-        self.url = None
+    def handle_up(self, e):
+        self.active_tab.scroll_up()
+        self.draw()
+
+    def handle_click(self, e):
+        if e.y < self.chrome.bottom:
+            self.chrome.click(e.x, e.y)
+        else:
+            tab_y = e.y - self.chrome.bottom
+            self.active_tab.click(e.x, tab_y)
+        self.draw()
+
+    def new_tab(self, url):
+        new_tab = Tab(HEIGHT - self.chrome.bottom)
+        new_tab.load(url)
+        self.active_tab = new_tab
+        self.tabs.append(new_tab)
+        self.draw()
 
     def draw(self):
         self.canvas.delete("all")
+        self.active_tab.draw(self.canvas, self.chrome.bottom)
+        for cmd in self.chrome.paint():
+            cmd.execute(0, self.canvas)
+
+
+class Tab:
+    def __init__(self, tab_height):
+        self.scroll = 0
+        self.max_scroll = 0
+        self.url = None
+        self.tab_height = tab_height
+
+    def draw(self, canvas, offset):
         for cmd in self.display_list:
-            if cmd.top > self.scroll + HEIGHT:
+            if cmd.rect.top > self.scroll + self.tab_height:
                 continue
-            if cmd.bottom < self.scroll:
+            if cmd.rect.bottom < self.scroll:
                 continue
-            cmd.execute(self.scroll, self.canvas)
+            cmd.execute(self.scroll - offset, canvas)
 
     def load(self, url):
         self.url = url
@@ -73,21 +112,17 @@ class Browser:
         self.display_list = []
         paint_tree(self.document, self.display_list)
         self.max_scroll = self.calculate_max_scroll()
-        self.draw()
 
-    def scroll_down(self, e):
+    def scroll_down(self):
         self.scroll = min(self.max_scroll, self.scroll + SCROLL_STEP)
-        self.draw()
 
-    def scroll_up(self, e):
+    def scroll_up(self):
         self.scroll = max(0, self.scroll - SCROLL_STEP)
-        self.draw()
 
     def calculate_max_scroll(self):
-        return max(0, self.document.height + 2 * VSTEP - HEIGHT)
-    
-    def click(self, e):
-        x, y = e.x, e.y
+        return max(0, self.document.height + 2 * VSTEP - self.tab_height)
+
+    def click(self, x, y):
         y += self.scroll
         objs = [
             obj for obj in tree_to_list(self.document, [])
@@ -108,11 +143,74 @@ class Browser:
             elt = elt.parent
 
 
-def tree_to_list(tree, list):
-    list.append(tree)
-    for child in tree.children:
-        tree_to_list(child, list)
-    return list
+class Chrome:
+    def __init__(self, browser):
+        self.browser = browser
+        self.font = get_font(20, "normal", "roman")
+        self.font_height = self.font.metrics("linespace")
+        self.padding = 5
+        self.tabbar_top = 0
+        self.tabbar_bottom = self.font_height + 2 * self.padding
+        plus_width = self.font.measure("+") + 2 * self.padding
+        self.new_tab_rect = Rect(
+            self.padding,
+            self.padding,
+            self.padding + plus_width,
+            self.padding + self.font_height,
+        )
+        self.bottom = self.tabbar_bottom
+
+    def tab_rect(self, i):
+        tabs_start = self.new_tab_rect.right + self.padding
+        tab_width = self.font.measure("Tab X") + 2 * self.padding
+        return Rect(
+            tabs_start + tab_width * i,
+            self.tabbar_top,
+            tabs_start + tab_width * (i + 1),
+            self.tabbar_bottom,
+        )
+
+    def paint(self):
+        cmds = []
+        # 背景と下線を描画
+        cmds.append(DrawRect(Rect(0, 0, WIDTH, self.bottom), "white"))
+        cmds.append(DrawLine(0, self.bottom, WIDTH, self.bottom, "black", 1))
+
+        # 新しいタブの四角形とプラス記号を描画
+        cmds.append(DrawOutline(self.new_tab_rect, "black", 1))
+        cmds.append(DrawText(
+            self.new_tab_rect.left + self.padding,
+            self.new_tab_rect.top,
+            "+",
+            self.font,
+            "black",
+        ))
+        for i, tab in enumerate(self.browser.tabs):
+            bounds = self.tab_rect(i)
+            if tab == self.browser.active_tab:
+                cmds.append(DrawRect(bounds, "lightgray"))
+            cmds.append(DrawLine(bounds.left, 0, bounds.left, bounds.bottom, "black", 1))
+            cmds.append(DrawLine(bounds.right, 0, bounds.right, bounds.bottom, "black", 1))
+            cmds.append(DrawText(
+                bounds.left + self.padding,
+                bounds.top + self.padding,
+                "Tab {}".format(i),
+                self.font,
+                "black",
+            ))
+            if tab == self.browser.active_tab:
+                cmds.append(DrawLine(0, bounds.bottom, bounds.left, bounds.bottom, "black", 1))
+                cmds.append(DrawLine(bounds.right, bounds.bottom, WIDTH, bounds.bottom, "black", 1))
+        return cmds
+
+    def click(self, x, y):
+        if self.new_tab_rect.contains_point(x, y):
+            self.browser.new_tab(URL("https://browser.engineering/"))
+        else:
+            for i, tab in enumerate(self.browser.tabs):
+                if self.tab_rect(i).contains_point(x, y):
+                    self.browser.active_tab = tab
+                    break
 
 
 if __name__ == "__main__":
@@ -122,5 +220,5 @@ if __name__ == "__main__":
         nodes = HTMLParser(body).parse()
         print_tree(nodes)
     else:
-        Browser().load(URL(sys.argv[1]))
+        Browser().new_tab(URL(sys.argv[1]))
         tkinter.mainloop()
