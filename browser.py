@@ -39,6 +39,8 @@ class Browser:
         self.window.bind("<Down>", self.handle_down)
         self.window.bind("<Up>", self.handle_up)
         self.window.bind("<Button-1>", self.handle_click)
+        self.window.bind("<Key>", self.handle_key)
+        self.window.bind("<Return>", self.handle_enter)
 
     def handle_down(self, e):
         self.active_tab.scroll_down()
@@ -54,6 +56,19 @@ class Browser:
         else:
             tab_y = e.y - self.chrome.bottom
             self.active_tab.click(e.x, tab_y)
+        self.draw()
+    
+    def handle_key(self, e):
+        if len(e.char) == 0:
+            return
+        # 英数字+記号だけを受け付ける
+        if not (0x20 <= ord(e.char) < 0x7f):
+            return
+        self.chrome.keypress(e.char)
+        self.draw()
+    
+    def handle_enter(self, e):
+        self.chrome.enter()
         self.draw()
 
     def new_tab(self, url):
@@ -76,6 +91,7 @@ class Tab:
         self.max_scroll = 0
         self.url = None
         self.tab_height = tab_height
+        self.history = []
 
     def draw(self, canvas, offset):
         for cmd in self.display_list:
@@ -88,9 +104,15 @@ class Tab:
     def load(self, url):
         self.url = url
         self.scroll = 0
+        self.history.append(url)
+
+        # ページを読み込む
         body = url.request()
         self.nodes = HTMLParser(body).parse()
+
+        # スタイルシートを適用
         rules = DEFAULT_STYLE_SHEET.copy()
+
         links = [
             node.attributes["href"]
             for node in tree_to_list(self.nodes, [])
@@ -106,7 +128,9 @@ class Tab:
             except Exception:
                 continue
             rules.extend(CSSParser(body).parse())
+        
         style(self.nodes, sorted(rules, key=cascade_priority))
+        
         self.document = DocumentLayout(self.nodes)
         self.document.layout()
         self.display_list = []
@@ -141,6 +165,12 @@ class Tab:
                 url = self.url.resolve(elt.attributes["href"])
                 return self.load(url)
             elt = elt.parent
+    
+    def go_back(self):
+        if len(self.history) > 1:
+            self.history.pop() # 現在のURLを削除
+            back_url = self.history.pop()
+            self.load(back_url)
 
 
 class Chrome:
@@ -158,7 +188,27 @@ class Chrome:
             self.padding + plus_width,
             self.padding + self.font_height,
         )
-        self.bottom = self.tabbar_bottom
+
+        self.url_bar_top = self.tabbar_bottom
+        self.url_bar_bottom = self.url_bar_top + self.font_height + 2 * self.padding
+        self.bottom = self.url_bar_bottom
+
+        back_width = self.font.measure("<") + 2 * self.padding
+        self.back_rect = Rect(
+            self.padding,
+            self.url_bar_top + self.padding,
+            self.padding + back_width,
+            self.url_bar_bottom - self.padding
+        )
+        self.address_rect = Rect(
+            self.back_rect.right + self.padding,
+            self.url_bar_top + self.padding,
+            WIDTH - self.padding,
+            self.url_bar_bottom - self.padding,
+        )
+
+        self.address_text = ""
+        self.focus = None
 
     def tab_rect(self, i):
         tabs_start = self.new_tab_rect.right + self.padding
@@ -176,7 +226,7 @@ class Chrome:
         cmds.append(DrawRect(Rect(0, 0, WIDTH, self.bottom), "white"))
         cmds.append(DrawLine(0, self.bottom, WIDTH, self.bottom, "black", 1))
 
-        # 新しいタブの四角形とプラス記号を描画
+        # 新しいタブボタンの四角形とプラス記号を描画
         cmds.append(DrawOutline(self.new_tab_rect, "black", 1))
         cmds.append(DrawText(
             self.new_tab_rect.left + self.padding,
@@ -185,6 +235,8 @@ class Chrome:
             self.font,
             "black",
         ))
+
+        # 各タブの四角形とタブ番号を描画
         for i, tab in enumerate(self.browser.tabs):
             bounds = self.tab_rect(i)
             if tab == self.browser.active_tab:
@@ -198,20 +250,72 @@ class Chrome:
                 self.font,
                 "black",
             ))
-            if tab == self.browser.active_tab:
-                cmds.append(DrawLine(0, bounds.bottom, bounds.left, bounds.bottom, "black", 1))
-                cmds.append(DrawLine(bounds.right, bounds.bottom, WIDTH, bounds.bottom, "black", 1))
+
+        # 戻るボタン
+        cmds.append(DrawOutline(self.back_rect, "black", 1))
+        cmds.append(DrawText(
+            self.back_rect.left + self.padding,
+            self.back_rect.top,
+            "<",
+            self.font,
+            "black",
+        ))
+
+        # アドレスバー
+        cmds.append(DrawOutline(self.address_rect, "black", 1))
+        if self.focus == "address bar":
+            cmds.append(DrawText(
+                self.address_rect.left + self.padding,
+                self.address_rect.top,
+                self.address_text,
+                self.font,
+                "black",
+            ))
+            # カーソルを描画
+            w = self.font.measure(self.address_text)
+            cmds.append(DrawLine(
+                self.address_rect.left + self.padding + w,
+                self.address_rect.top,
+                self.address_rect.left + self.padding + w,
+                self.address_rect.bottom,
+                "red",
+                1,
+            ))
+        else:
+            url = str(self.browser.active_tab.url)
+            cmds.append(DrawText(
+                self.address_rect.left + self.padding,
+                self.address_rect.top,
+                url,
+                self.font,
+                "black",
+            ))
+
         return cmds
 
     def click(self, x, y):
+        self.focus = None
         if self.new_tab_rect.contains_point(x, y):
             self.browser.new_tab(URL("https://browser.engineering/"))
+        elif self.back_rect.contains_point(x, y):
+            self.browser.active_tab.go_back()
+        elif self.address_rect.contains_point(x, y):
+            self.focus = "address bar"
+            self.address_text = ""
         else:
             for i, tab in enumerate(self.browser.tabs):
                 if self.tab_rect(i).contains_point(x, y):
                     self.browser.active_tab = tab
                     break
 
+    def keypress(self, char):
+        if self.focus == "address bar":
+            self.address_text += char
+
+    def enter(self):
+        if self.focus == "address bar":
+            self.browser.active_tab.load(URL(self.address_text))
+            self.focus = None
 
 if __name__ == "__main__":
     import sys
